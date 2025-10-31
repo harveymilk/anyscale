@@ -1,0 +1,2 @@
+s3://anyscale-videos/digimon.mp4
+s3://anyscale-videos/insane.mp4
