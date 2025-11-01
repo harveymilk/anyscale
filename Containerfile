@@ -1,19 +1,26 @@
-# Containerfile
+# Containerfile -- build with "anyscale image build -f Containerfile -n video-clip-summarizer-env --ray-version 2.33.0"
 FROM anyscale/ray:2.33.0-py310-cu123
 
-# (optional) video utils — remove if you don’t need ffmpeg
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+
+RUN python -m pip install -U pip setuptools wheel
+
+# 2) Install CUDA wheels for PyTorch first (cu121 wheels run fine on CUDA 12.x)
+RUN python -m pip install --index-url https://download.pytorch.org/whl/cu121 \
+    torch==2.2.2 torchvision==0.17.2
+
+
+RUN python -m pip install \
+    "ray[data]==2.33.0" \
+    opencv-python-headless==4.9.0.80 \
+    imageio==2.34.0 \
+    imageio-ffmpeg==0.4.9 \
+    numpy==1.26.4 \
+    pandas==2.2.2 \
+    fsspec==2024.6.0 \
+    s3fs==2024.6.0 \
+    dotenv==1.1.0
 
 WORKDIR /workspace
-COPY requirements.txt /tmp/requirements.txt
-
-# Install “regular” deps first
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
-
-# Install CUDA wheels for PyTorch 2.2.2 (cu121 wheels work with CUDA 12.3 drivers)
-RUN pip install --no-cache-dir \
-  --index-url https://download.pytorch.org/whl/cu121 \
-  torch==2.2.2 torchvision==0.17.2
-
-# Copy your repo last (better layer caching)
-COPY . /workspace

@@ -1,7 +1,8 @@
 import argparse
-import json
 import os
 from typing import List, Optional
+
+import s3fs
 import dotenv
 import ray
 import ray.data as rds
@@ -16,7 +17,7 @@ dotenv.load_dotenv()
 def parse_args():
     p = argparse.ArgumentParser(description="Ray Data video chunking + GPU summarization")
     g = p.add_mutually_exclusive_group(required=True)
-    g.add_argument("--uris", type=str, help="Comma‑separated list or glob (e.g., s3://bucket/prefix/*.mp4)")
+    g.add_argument("--uris", type=str, help="Comma-separated list or glob (e.g., s3://bucket/prefix/*.mp4)")
     g.add_argument("--uri-file", type=str, help="Text file with one URI per line")
 
     p.add_argument("--output", type=str, default="results.jsonl", help="Local or S3 path (if configured)")
@@ -25,9 +26,8 @@ def parse_args():
     p.add_argument("--read-parallelism", type=int, default=8, help="Parallel file readers")
     p.add_argument("--num-gpu-actors", type=int, default=0, help="# of GPU workers to load the model")
     p.add_argument("--batch-size", type=int, default=8, help="Clips per GPU batch")
-    p.add_argument("--topk", type=int, default=3, help="Top‑k labels per clip summary")
+    p.add_argument("--topk", type=int, default=3, help="Top-k labels per clip summary")
     return p.parse_args()
-
 
 def parse_uri_list(uris_arg: Optional[str], uri_file: Optional[str]) -> List[str]:
     if uri_file:
@@ -42,21 +42,27 @@ def parse_uri_list(uris_arg: Optional[str], uri_file: Optional[str]) -> List[str
 if __name__ == "__main__":
     args = parse_args()
 
-    # Initialize Ray (in Anyscale Jobs, Ray is already running)
     if not ray.is_initialized():
-        ray.init()
+        ray.init(address="auto")
 
     uris = parse_uri_list(args.uris, args.uri_file)
     print(f"Reading {len(uris)} URI(s) ...")
 
-    # 1) Read videos as binary (bytes) with their paths included
+
+    key = os.getenv("APP_AWS_ACCESS_KEY_ID") 
+    secret = os.getenv("APP_AWS_SECRET_ACCESS_KEY")
+    region = os.getenv("APP_AWS_REGION") or os.getenv("APP_AWS_DEFAULT_REGION") 
+
+    client_kwargs = {"region_name": region} if region else {}
+    fs_in = s3fs.S3FileSystem(key=key, secret=secret, client_kwargs=client_kwargs)
+
     ds = rds.read_binary_files(
         uris,
         include_paths=True,
         override_num_blocks=args.read_parallelism,
+        filesystem=fs_in,
     )
 
-    # 2) Explode each video into 30s clips with sampled frames
     clip_ds = ds.flat_map(
         lambda row: explode_into_clips(
             row,
@@ -68,11 +74,9 @@ if __name__ == "__main__":
     num_gpus_env = int(os.environ.get("N_GPUS", "0"))
     use_gpu = (args.num_gpu_actors > 0) or (num_gpus_env > 0)
 
-    # Always use ActorPoolStrategy for callable class UDFs.
-    # On CPU runs, we still use actors, just with num_gpus=0.
     actor_pool_size = args.num_gpu_actors or (num_gpus_env if num_gpus_env > 0 else 1)
 
-    summarizer = FrameSummarizer  # class (constructed on workers)
+    summarizer = FrameSummarizer  # constructed on workers
 
     summarized = clip_ds.map_batches(
         summarizer,
@@ -83,8 +87,17 @@ if __name__ == "__main__":
         fn_constructor_kwargs={"topk": args.topk},
     )
 
-    # 4) Write to JSONL (local). For S3, mount credentials + set output as s3://...
+    wanted_cols = [c for c in summarized.schema().names if c not in {"bytes"}]
+    summarized = summarized.select_columns(wanted_cols)
+
+
     out_path = args.output
+    fs_out = make_s3fs_if_needed(out_path)
     print(f"Writing results to {out_path}")
-    summarized.write_json(out_path)
+
+    if out_path.lower().endswith(".jsonl") or out_path.lower().endswith(".json"):
+        summarized.write_json(out_path, filesystem=fs_out)
+    else:
+        summarized.write_parquet(out_path, filesystem=fs_out)
+
     print("Done.")
