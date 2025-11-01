@@ -1,0 +1,9 @@
+# compute config -- upload to anyscale with "anyscale compute-config create -f compute.yaml" then record id
+
+head_node:
+  instance_type: m7i.large
+
+worker_nodes:
+  - instance_type: g5.2xlarge
+    min_nodes: 0
+    max_nodes: 80
